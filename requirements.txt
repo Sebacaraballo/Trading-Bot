@@ -1,0 +1,17 @@
+# Earnings Intelligence System — Phase 1
+# Python 3.11+
+
+# HTTP requests for SEC EDGAR API
+requests>=2.31.0
+
+# HTML parsing for 8-K filing text extraction
+beautifulsoup4>=4.12.0
+lxml>=5.1.0
+
+# Market data (earnings dates, EPS history)
+yfinance>=0.2.48
+
+# Rich terminal output
+rich>=13.7.0
+
+# Python standard library used: sqlite3, argparse, logging, dataclasses, datetime, re, time
