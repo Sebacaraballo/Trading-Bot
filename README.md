@@ -66,6 +66,8 @@ Backtested on 13 trades across AAPL, NVDA, MSFT, GOOGL (2024–2026):
 | Total Return | -13.0% |
 | SPY (same period) | +16.3% |
 
+> **Note:** The live demo runs on 3 seed signals and shows 2 trades (+3.3% vs SPY +2.8%). The table below reflects a fuller 13-trade backtest run locally across multiple earnings cycles. Expand coverage with `python main.py TSLA --filings 10 --analyze` and re-run `python main.py --backtest` to reproduce.
+
 The naive "buy bullish signal, hold 5 days" strategy underperformed SPY. 
 This is the honest result — and the starting point for strategy refinement. 
 Higher confidence thresholds and guidance quality filters are the next iteration.
