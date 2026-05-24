@@ -4,8 +4,8 @@
 > companies *say*, not just what their stock *does*.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.110-green)
-![React](https://img.shields.io/badge/React-18-61dafb)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.136-green)
+![React](https://img.shields.io/badge/React-19-61dafb)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ## What It Does
@@ -93,7 +93,7 @@ The React dashboard provides five views:
 | Storage | SQLite (WAL mode, migration-safe schema) |
 | Backtesting | NumPy, manual trade simulation |
 | API | FastAPI, Pydantic, uvicorn |
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS, Recharts |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS, Recharts |
 | CLI | argparse, rich |
 
 ---
