@@ -1,4 +1,4 @@
-# Earnings Intelligence System — Phase 1
+# Earnings Intelligence System
 # Python 3.11+
 
 # HTTP requests for SEC EDGAR API
@@ -14,4 +14,29 @@ yfinance>=0.2.48
 # Rich terminal output
 rich>=13.7.0
 
-# Python standard library used: sqlite3, argparse, logging, dataclasses, datetime, re, time
+# ── Phase 2: LLM signal extraction ────────────────────────────────────────
+# Anthropic Claude API client
+anthropic>=0.40.0
+
+# Load API keys from .env files
+python-dotenv>=1.0.0
+
+# ── Phase 3: Backtesting engine ────────────────────────────────────────────
+# The engine implements the trade simulation, Sharpe, and drawdown manually
+# with numpy + scipy — see backtest/engine.py.
+scipy>=1.11.0
+#
+# vectorbt is intentionally NOT installed: on this environment (numpy 2.4 /
+# pandas 3.0) it forces a destructive downgrade to pandas 2.3.3 and pulls in
+# ~45 transitive packages (numba, matplotlib, ipython, scikit-learn …), which
+# would break the Phase 1/2/5 code. The engine does not import it. To explore
+# it, use a separate venv:  pip install vectorbt>=0.26.0
+# vectorbt>=0.26.0
+
+# ── Phase 5: Dashboard backend ─────────────────────────────────────────────
+# FastAPI JSON API + ASGI server
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+
+# Python standard library used:
+#   sqlite3, argparse, logging, dataclasses, datetime, re, time, json

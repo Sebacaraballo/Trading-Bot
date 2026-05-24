@@ -1,38 +1,29 @@
-# Virtual environment
-.venv/
-venv/
-env/
+# Environment
+.env
 
-# Compiled Python
+# Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
 
-# Database files (local data — don't commit)
+# Database (contains real API responses — don't commit)
 *.db
 *.sqlite
 *.sqlite3
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
+# Node
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.vite/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Secrets / environment files (Phase 2+)
-.env
-.env.local
-*.env
-
-# Logs
-*.log
-
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
+# IDE
+.vscode/settings.json
+.idea/

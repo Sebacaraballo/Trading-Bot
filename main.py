@@ -1,18 +1,21 @@
 """
 main.py
 -------
-CLI entry point for the Earnings Intelligence System — Phase 1.
+CLI entry point for the Earnings Intelligence System.
 
 Usage
 -----
+    # Phase 1 — data ingest
     python main.py AAPL
-    python main.py AAPL --filings 3
     python main.py AAPL --filings 3 --preview
-    python main.py AAPL --filings 5 --db ./data/my_db.sqlite --preview
 
-The command fetches recent 8-K filings from SEC EDGAR and historical
-earnings dates from yfinance, then stores everything in a local SQLite
-database ready for Phase 2 (LLM signal extraction).
+    # Phase 2 — LLM signal extraction (requires ANTHROPIC_API_KEY in .env)
+    python main.py AAPL --analyze
+    python main.py AAPL --filings 3 --analyze
+
+    # Phase 3 — backtest stored signals against historical prices
+    python main.py --backtest
+    python main.py --backtest --start 2024-01-01 --threshold 0.6
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from pathlib import Path
 from rich.columns import Columns
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
@@ -58,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="Earnings Intelligence System — Phase 1: Data Ingest",
+        description="Earnings Intelligence System — data ingest + LLM signal extraction",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent(
             """\
@@ -66,13 +70,17 @@ def build_parser() -> argparse.ArgumentParser:
               python main.py AAPL
               python main.py MSFT --filings 3 --preview
               python main.py NVDA --filings 10 --db ./nvda.db
+              python main.py AAPL --analyze
+              python main.py AAPL --filings 3 --analyze
             """
         ),
     )
     parser.add_argument(
         "ticker",
         type=str,
-        help="Stock ticker symbol (e.g. AAPL, MSFT, NVDA)",
+        nargs="?",
+        default=None,
+        help="Stock ticker symbol (e.g. AAPL, MSFT, NVDA). Omit with --backtest.",
     )
     parser.add_argument(
         "--filings",
@@ -85,6 +93,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--preview",
         action="store_true",
         help="Print the first 600 words of the most recent filing",
+    )
+    parser.add_argument(
+        "--analyze",
+        action="store_true",
+        help=(
+            "Run Phase 2: fetch Exhibit 99.1 for each filing and extract "
+            "LLM signals (requires ANTHROPIC_API_KEY in .env)"
+        ),
+    )
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run Phase 3: replay stored signals against historical prices",
+    )
+    parser.add_argument(
+        "--start",
+        type=str,
+        default="2024-01-01",
+        metavar="DATE",
+        help="Backtest start date, ISO format (default: 2024-01-01)",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.6,
+        metavar="CONF",
+        help="Minimum signal confidence to trade in the backtest (default: 0.6)",
     )
     parser.add_argument(
         "--db",
@@ -177,6 +212,203 @@ def print_filings_table(result: IngestResult) -> None:
     console.print(tbl)
 
 
+def print_signal(result, idx: int, total: int) -> None:
+    """
+    Render a single EarningsSignal to the console in a rich panel.
+
+    Args:
+        result: :class:`~analysis.pipeline.SignalResult` from the pipeline.
+        idx:    1-based filing index (for the panel title).
+        total:  Total number of filings being processed.
+    """
+    from analysis.pipeline import SignalResult  # local import avoids circular dep at module level
+
+    if not result.success or result.signal is None:
+        error_msg = result.error or "Unknown error"
+        console.print(
+            Panel(
+                f"[red]✗ Failed:[/red] {error_msg}",
+                title=f"[dim]{result.ticker}  {result.filing_date}[/dim]",
+                border_style="red",
+            )
+        )
+        return
+
+    sig = result.signal
+
+    # Colour-code direction
+    dir_colour = {
+        "LONG":    "green",
+        "SHORT":   "red",
+        "NEUTRAL": "yellow",
+    }.get(sig.direction, "white")
+
+    sentiment_icon = {
+        "bullish": "📈",
+        "bearish": "📉",
+        "neutral": "➡️ ",
+    }.get(sig.sentiment, "")
+
+    # EPS / revenue badges
+    def beat_badge(val) -> str:
+        if val is True:
+            return "[green]BEAT[/green]"
+        if val is False:
+            return "[red]MISS[/red]"
+        return "[dim]N/A[/dim]"
+
+    # Guidance badge
+    guidance_colour = {
+        "raised":    "green",
+        "lowered":   "red",
+        "withdrawn": "red",
+        "maintained":"yellow",
+        "none":      "dim",
+    }.get(sig.guidance_quality, "dim")
+
+    # Risk flags
+    risks = "  ".join(f"[dim]•[/dim] {r}" for r in sig.risk_flags) if sig.risk_flags else "[dim]none[/dim]"
+
+    body = (
+        f"[bold {dir_colour}]{sig.direction}[/bold {dir_colour}]  "
+        f"{sentiment_icon} [dim]confidence[/dim] {sig.confidence:.0%}  "
+        f"  [dim]model[/dim] {sig.model}\n\n"
+        f"[dim]EPS[/dim]      {beat_badge(sig.eps_beat)}   "
+        f"[dim]Revenue[/dim]  {beat_badge(sig.revenue_beat)}   "
+        f"[dim]Guidance[/dim]  [{guidance_colour}]{sig.guidance_quality}[/{guidance_colour}]   "
+        f"[dim]Tone[/dim]  {sig.management_tone}\n\n"
+        f"[bold]Reasoning[/bold]\n{sig.reasoning}\n\n"
+        f"[green]▲ Bull case[/green]  {sig.bull_case}\n"
+        f"[red]▼ Bear case[/red]  {sig.bear_case}\n\n"
+        f"[bold dim]Risk flags[/bold dim]  {risks}\n\n"
+        f"[dim]tokens: {sig.prompt_tokens} prompt / {sig.completion_tokens} completion[/dim]"
+    )
+
+    console.print(
+        Panel(
+            body,
+            title=f"[bold]{result.ticker}[/bold]  [dim]{result.filing_date}[/dim]  "
+                  f"[dim]({idx}/{total})[/dim]",
+            border_style=dir_colour,
+            padding=(1, 2),
+        )
+    )
+
+
+def run_analysis(ticker: str, db: Database) -> None:
+    """
+    Execute the Phase 2 signal extraction pipeline with a rich progress display.
+
+    Args:
+        ticker: Stock ticker symbol.
+        db:     Open :class:`~storage.database.Database` instance.
+    """
+    from analysis.pipeline import SignalPipeline
+
+    console.print()
+    console.print(Rule("[bold]Phase 2 — LLM Signal Extraction[/bold]", style="cyan"))
+
+    # Lazy import LLMClient so missing API key gives a clean error message
+    try:
+        from analysis.llm_client import LLMClient
+        llm = LLMClient()
+    except ValueError as exc:
+        console.print(f"\n[bold red]Error:[/bold red] {exc}")
+        return
+
+    pipeline = SignalPipeline(db=db, llm_client=llm)
+    pending = pipeline.get_pending_filings(ticker)
+
+    if not pending:
+        console.print(
+            f"\n[yellow]⚠[/yellow]  No unanalyzed filings found for [bold]{ticker}[/bold].\n"
+            f"  Run [dim]python main.py {ticker}[/dim] first to fetch filings, "
+            "or all filings may already have signals."
+        )
+        return
+
+    console.print(
+        f"\nFound [bold]{len(pending)}[/bold] filing(s) to analyze for [bold]{ticker}[/bold].\n"
+    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task(f"Analyzing {ticker}…", total=len(pending))
+
+        for i, filing in enumerate(pending, start=1):
+            progress.update(
+                task,
+                description=f"[cyan]{ticker}[/cyan]  {filing['filing_date']}  "
+                             f"({i}/{len(pending)})  fetching exhibit…",
+            )
+            result = pipeline.process_filing(filing)
+            progress.advance(task)
+
+            # Print result panel outside the progress bar
+            progress.stop()
+            print_signal(result, i, len(pending))
+            progress.start()
+
+    # Summary
+    run_summary_table(ticker, pending, pipeline)
+
+
+def run_summary_table(ticker: str, pending: list, pipeline) -> None:
+    """Print a compact signals summary table after the pipeline completes."""
+    from analysis.pipeline import SignalPipeline
+
+    console.print()
+    console.print(Rule("[bold]Signals Summary[/bold]", style="dim"))
+
+    company = pipeline._db.get_company(ticker)
+    if company is None:
+        return
+
+    signals = pipeline._db.get_signals(company["id"])
+    if not signals:
+        return
+
+    import json as _json
+
+    tbl = Table(
+        "Date", "Direction", "Conf.", "Guidance", "EPS", "Revenue", "Tone",
+        box=None,
+        padding=(0, 2),
+        header_style="bold dim",
+    )
+
+    dir_colour = {"LONG": "green", "SHORT": "red", "NEUTRAL": "yellow"}
+
+    for s in signals:
+        km = _json.loads(s["key_metrics"] or "{}")
+        direction = s["direction"] or "NEUTRAL"
+        col = dir_colour.get(direction, "white")
+
+        def _beat(val):
+            if val is True:  return "[green]beat[/green]"
+            if val is False: return "[red]miss[/red]"
+            return "—"
+
+        tbl.add_row(
+            s["signal_date"],
+            f"[{col}]{direction}[/{col}]",
+            f"{s['confidence']:.0%}",
+            km.get("guidance_quality", "—"),
+            _beat(km.get("eps_beat")),
+            _beat(km.get("revenue_beat")),
+            km.get("management_tone", "—"),
+        )
+
+    console.print(tbl)
+    console.print()
+
+
 def print_preview(result: IngestResult, word_limit: int = 600) -> None:
     """
     Print a truncated preview of the most recent successful filing.
@@ -220,6 +452,85 @@ def print_preview(result: IngestResult, word_limit: int = 600) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3 — backtest
+# ---------------------------------------------------------------------------
+
+def print_backtest_results(results: dict) -> None:
+    """Render a rich summary table of backtest metrics (fractions → %)."""
+    console.print()
+    console.print(Rule("[bold]Backtest Results[/bold]", style="cyan"))
+
+    def _pct(v: float, signed: bool = True) -> str:
+        return f"{v * 100:+.1f}%" if signed else f"{v * 100:.1f}%"
+
+    total_ret = results["total_return_pct"]
+    spy_ret = results["spy_return_pct"]
+    beat = total_ret > spy_ret
+    ret_colour = "green" if total_ret >= 0 else "red"
+    vs_colour = "green" if beat else "red"
+    win_colour = "green" if results["win_rate"] > 0.5 else "yellow"
+    sharpe = results["sharpe_ratio"]
+    sharpe_colour = "green" if sharpe > 1.0 else "yellow" if sharpe >= 0.5 else "red"
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("key", style="dim", no_wrap=True)
+    table.add_column("value", style="bold")
+
+    table.add_row("Signals evaluated", str(results["total_signals_evaluated"]))
+    table.add_row("Trades executed", str(results["trades_executed"]))
+    table.add_row("Trades skipped", str(results["trades_skipped"]))
+    table.add_row("Win rate", f"[{win_colour}]{_pct(results['win_rate'], signed=False)}[/{win_colour}]")
+    table.add_row("Avg return/trade", f"[{ret_colour}]{_pct(results['avg_return_pct'])}[/{ret_colour}]")
+    table.add_row("Total return", f"[{ret_colour}]{_pct(total_ret)}[/{ret_colour}]")
+    table.add_row("Sharpe ratio", f"[{sharpe_colour}]{sharpe:.2f}[/{sharpe_colour}]")
+    table.add_row("Max drawdown", f"[red]{_pct(results['max_drawdown_pct'])}[/red]")
+    table.add_row(
+        "SPY (same period)",
+        f"{_pct(spy_ret)}   [{vs_colour}]"
+        f"({'beat' if beat else 'trailed'} by {abs(total_ret - spy_ret) * 100:.1f} pts)"
+        f"[/{vs_colour}]",
+    )
+
+    console.print(
+        Panel(table, title="[bold cyan]Backtest Results[/bold cyan]",
+              border_style="cyan", padding=(1, 2))
+    )
+
+
+def run_backtest(db_path: str, start: str, threshold: float) -> None:
+    """
+    Execute the Phase 3 backtest, persist it, and print a summary table.
+
+    Args:
+        db_path:   SQLite path.
+        start:     Backtest start date (ISO).
+        threshold: Minimum confidence to trade.
+    """
+    from backtest.engine import BacktestEngine
+    from backtest.store import save_backtest_run
+
+    console.print()
+    console.print(Rule("[bold]Phase 3 — Backtesting Engine[/bold]", style="cyan"))
+    console.print()
+
+    engine = BacktestEngine(db_path)
+    results = engine.run(start_date=start, confidence_threshold=threshold)
+
+    if results["trades_executed"] == 0:
+        console.print(
+            "\n[yellow]⚠[/yellow]  No trades were executed — nothing to persist.\n"
+            "  Generate signals first with [dim]python main.py TICKER --analyze[/dim], "
+            "or widen the date range / lower --threshold."
+        )
+        print_backtest_results(results)
+        return
+
+    run_id = save_backtest_run(engine._db, results)
+    print_backtest_results(results)
+    console.print(f"\n[dim]Saved backtest run #{run_id} to the database.[/dim]")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -236,6 +547,29 @@ def main() -> None:
         logging.getLogger().setLevel(logging.DEBUG)
 
     print_header()
+
+    # ── Phase 3 — backtest mode (no ticker required) ──────────────────────
+    if args.backtest:
+        try:
+            run_backtest(args.db, args.start, args.threshold)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted.[/yellow]")
+            sys.exit(130)
+        except Exception as exc:
+            console.print(f"\n[bold red]Backtest error:[/bold red] {exc}")
+            logger.exception("Unhandled exception in run_backtest()")
+            sys.exit(1)
+        console.print()
+        return
+
+    # ── Phases 1/2 require a ticker ───────────────────────────────────────
+    if not args.ticker:
+        console.print(
+            "\n[bold red]Error:[/bold red] a TICKER is required "
+            "(or pass --backtest to run Phase 3).\n"
+            "  e.g. [dim]python main.py AAPL --analyze[/dim]"
+        )
+        sys.exit(1)
 
     # Initialise database and fetcher
     try:
@@ -266,6 +600,10 @@ def main() -> None:
 
     if args.preview:
         print_preview(result)
+
+    # Phase 2 — LLM signal extraction
+    if args.analyze:
+        run_analysis(args.ticker.upper(), db)
 
     console.print()
 

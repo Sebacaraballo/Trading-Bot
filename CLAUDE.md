@@ -8,8 +8,8 @@ Reads SEC 8-K filings → LLM extracts trade signals → executes paper trades.
 | Phase | Status    | Description                                          |
 |-------|-----------|------------------------------------------------------|
 | 1     | ✅ Done   | Data ingestion — SEC 8-K filings + yfinance earnings |
-| 2     | 🔜 Next   | LLM signal extraction (Anthropic Claude API)         |
-| 3     | 🔜 Future | Backtesting engine                                   |
+| 2     | ✅ Done   | LLM signal extraction (Anthropic Claude API)         |
+| 3     | ✅ Done   | Backtesting engine — replay signals vs historical prices |
 | 4     | 🔜 Future | Alpaca paper trading integration                     |
 
 ## Quick start
@@ -27,10 +27,21 @@ earnings-intel/
 ├── main.py                  CLI entry point (argparse + rich)
 ├── requirements.txt
 ├── earnings_intel.db        SQLite database (auto-created on first run)
-├── data/
+├── data/                    Phase 1 — ingestion
 │   ├── sec_client.py        SEC EDGAR API wrapper
 │   ├── market_client.py     yfinance wrapper
 │   └── fetcher.py           Orchestrator: calls SEC + yfinance, writes to DB
+├── analysis/                Phase 2 — LLM signal extraction
+│   ├── exhibit_fetcher.py   Pulls Exhibit 99.1 from the filing index
+│   ├── prompt.py            System + user prompt templates
+│   ├── llm_client.py        Anthropic Claude API client
+│   └── pipeline.py          Orchestrates fetch → LLM → save
+├── backtest/                Phase 3 — backtesting engine
+│   ├── engine.py            Load signals → fetch prices → simulate → metrics
+│   └── store.py             save_backtest_run / get_latest_backtest
+├── api/                     Phase 5 — FastAPI backend
+│   └── main.py              JSON endpoints over the SQLite DB
+├── dashboard/               Phase 5 — React + TypeScript + Vite frontend
 └── storage/
     └── database.py          SQLite schema + typed upsert/query methods
 ```
@@ -38,14 +49,35 @@ earnings-intel/
 ## CLI reference
 
 ```
-python main.py TICKER [--filings N] [--preview] [--db PATH] [--verbose]
+python main.py TICKER [--filings N] [--preview] [--analyze] [--db PATH] [--verbose]
+python main.py --backtest [--start DATE] [--threshold CONF] [--db PATH]
 
-  TICKER          Stock ticker (AAPL, MSFT, NVDA …)
+  TICKER          Stock ticker (AAPL, MSFT, NVDA …) — omit with --backtest
   --filings N     Number of 8-K filings to fetch (default 5)
   --preview       Print first 600 words of the most recent filing
+  --analyze       Phase 2: fetch Exhibit 99.1 + extract LLM signals
+  --backtest      Phase 3: replay stored signals against historical prices
+  --start DATE    Backtest start date, ISO (default: 2024-01-01)
+  --threshold C   Min signal confidence to trade in the backtest (default: 0.6)
   --db PATH       SQLite file path (default: earnings_intel.db)
   --verbose       Enable DEBUG logging
 ```
+
+### Phase 3 backtest
+
+```bash
+# Backtest all stored bullish signals (confidence ≥ 0.6) since 2024-01-01
+python main.py --backtest
+
+# Custom window / threshold
+python main.py --backtest --start 2024-01-01 --threshold 0.6
+```
+
+Strategy: buy bullish, high-confidence signals at the filing-date close, sell 5
+trading days later (equal capital, sequentially compounded). Metrics — win rate,
+Sharpe (annualized, 5-day hold), max drawdown, total return vs SPY — are computed
+manually in `backtest/engine.py` (numpy only) and stored in `backtest_runs`. The
+dashboard Backtest page reads them via `GET /api/backtest/latest`.
 
 ## Database schema (all phases)
 

@@ -105,7 +105,19 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     total_pnl       REAL,
     sharpe_ratio    REAL,
     max_drawdown    REAL,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- Phase 3 result fields (added via _migrate_backtest_columns for old DBs).
+    -- All ratio/return fields are stored as DECIMAL FRACTIONS (0.05 == 5%).
+    run_date                TEXT,
+    confidence_threshold    REAL,
+    total_signals_evaluated INTEGER,
+    trades_skipped          INTEGER,
+    win_rate                REAL,
+    avg_return_pct          REAL,
+    total_return_pct        REAL,
+    spy_return_pct          REAL,
+    trades_json             TEXT,   -- JSON list of per-trade dicts
+    equity_curve_json       TEXT    -- JSON list of {date, value} points
 );
 
 -- ── Phase 4: Alpaca paper trades ──────────────────────────────────────────
@@ -181,7 +193,37 @@ class Database:
     def _init_schema(self) -> None:
         """Create all tables and indexes if they do not already exist."""
         self._conn.executescript(_SCHEMA_SQL)
+        self._migrate_backtest_columns()
         self._conn.commit()
+
+    def _migrate_backtest_columns(self) -> None:
+        """
+        Add the Phase 3 result columns to ``backtest_runs`` on databases created
+        before Phase 3.  ``CREATE TABLE IF NOT EXISTS`` never alters an existing
+        table, so we ALTER in any missing columns idempotently.
+        """
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(backtest_runs)")
+        }
+        new_columns = {
+            "run_date": "TEXT",
+            "confidence_threshold": "REAL",
+            "total_signals_evaluated": "INTEGER",
+            "trades_skipped": "INTEGER",
+            "win_rate": "REAL",
+            "avg_return_pct": "REAL",
+            "total_return_pct": "REAL",
+            "spy_return_pct": "REAL",
+            "trades_json": "TEXT",
+            "equity_curve_json": "TEXT",
+        }
+        for name, col_type in new_columns.items():
+            if name not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE backtest_runs ADD COLUMN {name} {col_type}"
+                )
+                logger.debug("Migrated backtest_runs: added column %s", name)
 
     @contextmanager
     def _cursor(self) -> Generator[sqlite3.Cursor, None, None]:
@@ -463,6 +505,108 @@ class Database:
             (company_id,),
         ).fetchone()
         return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # signals  (Phase 2)
+    # ------------------------------------------------------------------
+
+    def save_signal(
+        self,
+        filing_id: int,
+        company_id: int,
+        signal_date: str,
+        signal,  # analysis.llm_client.EarningsSignal — avoid circular import
+    ) -> int:
+        """
+        Persist an LLM-extracted signal to the ``signals`` table.
+
+        Maps the :class:`~analysis.llm_client.EarningsSignal` dataclass to the
+        DB schema, storing extended fields (guidance_quality, management_tone,
+        risk_flags, bull_case, bear_case) in the ``key_metrics`` JSON blob.
+
+        Args:
+            filing_id:   FK to ``filings.id``.
+            company_id:  FK to ``companies.id``.
+            signal_date: ISO date string for the filing/signal date.
+            signal:      Populated ``EarningsSignal`` dataclass.
+
+        Returns:
+            The ``signals.id`` primary key of the inserted row.
+
+        Raises:
+            sqlite3.IntegrityError: If a signal for this ``filing_id`` already
+                exists (each filing gets at most one signal).
+        """
+        import json
+
+        key_metrics = json.dumps(
+            {
+                "guidance_quality": signal.guidance_quality,
+                "eps_beat":         signal.eps_beat,
+                "revenue_beat":     signal.revenue_beat,
+                "management_tone":  signal.management_tone,
+                "risk_flags":       signal.risk_flags,
+                "bull_case":        signal.bull_case,
+                "bear_case":        signal.bear_case,
+                "sentiment":        signal.sentiment,
+            },
+            ensure_ascii=False,
+        )
+
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO signals
+                    (filing_id, company_id, signal_date, direction, confidence,
+                     reasoning, key_metrics, llm_model,
+                     llm_prompt_tokens, llm_completion_tokens, raw_llm_response)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    filing_id,
+                    company_id,
+                    signal_date,
+                    signal.direction,
+                    signal.confidence,
+                    signal.reasoning,
+                    key_metrics,
+                    signal.model,
+                    signal.prompt_tokens,
+                    signal.completion_tokens,
+                    signal.raw_response,
+                ),
+            )
+            return cur.lastrowid  # type: ignore[return-value]
+
+    def get_signals(
+        self,
+        company_id: int,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """
+        Return stored signals for a company, newest first.
+
+        Args:
+            company_id: FK to ``companies.id``.
+            limit:      Maximum rows to return.
+
+        Returns:
+            List of row dictionaries (``raw_llm_response`` excluded to keep
+            output concise; query directly for the full blob).
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id, filing_id, company_id, signal_date, direction,
+                   confidence, reasoning, key_metrics, llm_model,
+                   llm_prompt_tokens, llm_completion_tokens, created_at
+            FROM   signals
+            WHERE  company_id = ?
+            ORDER BY signal_date DESC
+            LIMIT ?
+            """,
+            (company_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Utility
