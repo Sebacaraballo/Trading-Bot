@@ -231,6 +231,34 @@ def seed(db: Database) -> int:
     return inserted
 
 
+def seed_backtest(db: Database) -> None:
+    """
+    Run the backtest engine over the seeded signals and persist the result so
+    the dashboard's Backtest page shows real data on first load.
+
+    Has its own idempotency check (independent of the signals seed) so it still
+    runs on a reboot where signals already exist. Wrapped in try/except: a
+    yfinance/network hiccup on the host must never block startup — the signals
+    still serve, and the next boot retries the backtest.
+    """
+    existing = db._conn.execute("SELECT COUNT(*) AS n FROM backtest_runs").fetchone()["n"]
+    if existing > 0:
+        print("[seed] Backtest already exists, skipping")
+        return
+
+    try:
+        from backtest.engine import BacktestEngine
+        from backtest.store import save_backtest_run
+
+        # NB: confidence_threshold is a run() argument, not a constructor one.
+        engine = BacktestEngine(db_path=DB_PATH)
+        results = engine.run(confidence_threshold=0.7)
+        save_backtest_run(db, results)
+        print("[seed] Backtest seeded")
+    except Exception as exc:
+        print(f"[seed] Backtest seeding failed (skipping): {exc}")
+
+
 def main() -> None:
     db = Database(DB_PATH)
 
@@ -240,10 +268,11 @@ def main() -> None:
             f"[seed] signals table already has {existing} row(s) — "
             "skipping demo seed (idempotent)."
         )
-        return
+    else:
+        count = seed(db)
+        print(f"[seed] done — inserted {count} demo signals into {db.db_path}")
 
-    count = seed(db)
-    print(f"[seed] done — inserted {count} demo signals into {db.db_path}")
+    seed_backtest(db)
 
 
 if __name__ == "__main__":
