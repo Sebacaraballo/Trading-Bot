@@ -36,7 +36,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -51,12 +50,9 @@ logger = logging.getLogger(__name__)
 # Database
 # ---------------------------------------------------------------------------
 
-# api/main.py lives in api/, so the project root is one level up.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_DEFAULT_DB = _PROJECT_ROOT / "earnings_intel.db"
-_DB_PATH = os.environ.get("EARNINGS_DB_PATH", str(_DEFAULT_DB))
-
-db = Database(_DB_PATH)
+# DB_PATH is set in production (Railway); defaults to the project-root DB locally.
+db_path = os.getenv("DB_PATH", "earnings_intel.db")
+db = Database(db_path)
 
 # ---------------------------------------------------------------------------
 # App + CORS
@@ -68,12 +64,14 @@ app = FastAPI(
     description="Read-only API serving SEC 8-K signals for the Phase 5 dashboard.",
 )
 
+# Comma-separated list of allowed origins. In production set ALLOWED_ORIGINS to
+# the deployed Vercel URL(s); defaults to the local Vite dev server.
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
+origins = [o.strip() for o in allowed_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["GET"],
     allow_headers=["*"],

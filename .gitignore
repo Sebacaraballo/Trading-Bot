@@ -27,3 +27,7 @@ Thumbs.db
 # IDE
 .vscode/settings.json
 .idea/
+
+# Deploy/demo scripts are intentionally tracked (guard against wildcards above)
+!scripts/
+!scripts/*.py
