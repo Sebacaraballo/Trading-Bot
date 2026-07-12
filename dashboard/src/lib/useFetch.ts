@@ -1,5 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
-import { ApiError } from "./api";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import {
+  ApiError,
+  isSnapshotFallbackActive,
+  subscribeSnapshotFallback,
+} from "./api";
+
+// True once any request fell back from a configured live API to the bundled
+// snapshot. Drives the header's "cached data" badge.
+export function useSnapshotFallback(): boolean {
+  return useSyncExternalStore(subscribeSnapshotFallback, isSnapshotFallbackActive);
+}
 
 interface FetchState<T> {
   data: T | null;

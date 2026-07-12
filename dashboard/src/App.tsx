@@ -5,8 +5,10 @@ import {
   FileText,
   TrendingUp,
   Briefcase,
+  DatabaseZap,
 } from "lucide-react";
 import type { ComponentType } from "react";
+import { useSnapshotFallback } from "./lib/useFetch";
 import Overview from "./pages/Overview";
 import Signals from "./pages/Signals";
 import SignalDetail from "./pages/SignalDetail";
@@ -70,6 +72,7 @@ function Sidebar() {
 }
 
 function Header({ title }: { title: string }) {
+  const usingCachedData = useSnapshotFallback();
   const stamp = new Date().toLocaleString(undefined, {
     month: "short",
     day: "numeric",
@@ -79,8 +82,19 @@ function Header({ title }: { title: string }) {
   return (
     <header className="flex h-16 shrink-0 items-center justify-between border-b border-[var(--border)] px-8">
       <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
-      <div className="text-xs text-[var(--text-muted)]">
-        Last updated <span className="text-[var(--text-primary)]">{stamp}</span>
+      <div className="flex items-center gap-3">
+        {usingCachedData && (
+          <span
+            title="The live API is unreachable. Showing the data snapshot bundled with this build."
+            className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--text-muted)]"
+          >
+            <DatabaseZap className="h-3 w-3" />
+            cached data
+          </span>
+        )}
+        <div className="text-xs text-[var(--text-muted)]">
+          Last updated <span className="text-[var(--text-primary)]">{stamp}</span>
+        </div>
       </div>
     </header>
   );
