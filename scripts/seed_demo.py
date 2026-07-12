@@ -1,21 +1,21 @@
 """
 scripts/seed_demo.py
 --------------------
-Seed the database with a few realistic demo signals so the deployed dashboard
-looks alive when a recruiter visits the public URL.
+Seed an empty database with the full demo dataset exported from the real local
+pipeline run (scripts/demo_data.json, produced by scripts/export_demo_data.py):
+50 LLM-scored signals across 10 tickers, their filings and earnings dates, and
+the latest backtest run.
 
 Behaviour:
-  * Idempotent — if the ``signals`` table already has any rows, it exits without
-    touching the database (so it's safe to run on every Railway boot).
-  * Creates the schema if the DB file doesn't exist yet (a fresh Railway
-    container starts with no DB, since *.db is gitignored).
-  * Inserts matching ``companies`` and ``filings`` rows first so the signal
-    foreign keys resolve.
-
-The signal payload matches how the real Phase 2 pipeline stores data: the
-analysis fields (sentiment, guidance_quality, management_tone, risk_flags,
-bull_case, bear_case) live inside the ``key_metrics`` JSON blob, which the API
-flattens for the frontend.
+  * Idempotent — if the ``signals`` table already has any rows, the dataset
+    seed is skipped (safe to run on every backend boot). The backtest seed has
+    its own independent check on ``backtest_runs``.
+  * Creates the schema if the DB file doesn't exist yet (a fresh container
+    starts with no DB, since *.db is gitignored).
+  * Inserts ``companies`` and ``filings`` rows first and maps their fresh ids
+    so the signal foreign keys resolve.
+  * The backtest run is inserted verbatim from the export — no yfinance calls
+    at boot, so results always match the static snapshot and the README.
 
 Run standalone:
     python scripts/seed_demo.py
@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Allow `python scripts/seed_demo.py` from anywhere by putting the project
@@ -34,233 +35,130 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from storage.database import Database  # noqa: E402  (import after sys.path tweak)
+from backtest.store import save_backtest_run  # noqa: E402
 
 # Same env var / default the API uses, so both read & write the same file.
 DB_PATH = os.getenv("DB_PATH", "earnings_intel.db")
 
-_MODEL = "claude-haiku-4-5-20251001"
-
-# Each entry carries company metadata, a synthetic filing, and the signal.
-DEMO_SIGNALS = [
-    {
-        "ticker": "NVDA",
-        "cik": "0001045810",
-        "name": "NVIDIA Corporation",
-        "accession_number": "0001045810-26-000050",
-        "filing_date": "2026-05-20",
-        "confidence": 0.95,
-        "sentiment": "bullish",
-        "guidance_quality": "raised",
-        "management_tone": "optimistic",
-        "risk_flags": [
-            "China Data Center exclusion from guidance",
-            "Inventory buildup risk",
-            "Geopolitical headwinds",
-        ],
-        "extra_metrics": {
-            "forward_guidance_change": "raised",
-            "revenue_yoy_growth": 0.85,
-        },
-        "bull_case": (
-            "NVIDIA delivered record $81.6B revenue (+85% YoY) with Data Center "
-            "revenue reaching $75.2B (+92% YoY), while raising guidance to "
-            "$91.0B and authorizing an $80B share repurchase."
-        ),
-        "bear_case": (
-            "Management excluded all China Data Center compute revenue from "
-            "forward guidance, signaling geopolitical headwinds."
-        ),
-        "reasoning": (
-            "NVIDIA posted exceptional topline growth with Q1 FY27 revenue of "
-            "$81.6B up 85% YoY. Q2 guidance of $91.0B represents a 12% sequential "
-            "increase. The zero China assumption introduces material downside risk."
-        ),
-    },
-    {
-        "ticker": "AAPL",
-        "cik": "0000320193",
-        "name": "Apple Inc.",
-        "accession_number": "0000320193-26-000045",
-        "filing_date": "2026-04-30",
-        "confidence": 0.85,
-        "sentiment": "bullish",
-        "guidance_quality": "none",
-        "management_tone": "optimistic",
-        "risk_flags": [
-            "Tariff uncertainty on hardware margins",
-            "China revenue exposure",
-            "Services growth deceleration risk",
-        ],
-        "extra_metrics": {
-            "forward_guidance_change": "maintained",
-            "revenue_yoy_growth": 0.17,
-        },
-        "bull_case": (
-            "Apple delivered $111.2B revenue (+17% YoY), its best March quarter "
-            "ever, driven by iPhone 17 lineup. $2.01 diluted EPS (+22% YoY) with "
-            "a $100B buyback and 4% dividend increase."
-        ),
-        "bear_case": (
-            "Management provided no forward guidance citing macro uncertainty. "
-            "China revenue remains a key risk amid ongoing trade tensions."
-        ),
-        "reasoning": (
-            "Apple's Q2 FY2026 results significantly exceeded expectations with "
-            "broad-based strength across all geographies and product categories. "
-            "The lack of forward guidance is the primary risk factor."
-        ),
-    },
-    {
-        "ticker": "MSFT",
-        "cik": "0000789019",
-        "name": "Microsoft Corporation",
-        "accession_number": "0000789019-26-000060",
-        "filing_date": "2026-04-29",
-        "confidence": 0.85,
-        "sentiment": "bullish",
-        "guidance_quality": "raised",
-        "management_tone": "optimistic",
-        "risk_flags": [
-            "Azure capacity constraints",
-            "AI capex pace",
-            "FX headwinds in international markets",
-        ],
-        "extra_metrics": {
-            "forward_guidance_change": "raised",
-            "revenue_yoy_growth": 0.13,
-        },
-        "bull_case": (
-            "Microsoft reported $70.1B revenue (+13% YoY) with Azure growth "
-            "accelerating to 35% YoY. Copilot monetization is beginning to show "
-            "up in commercial bookings with $18B in new AI commitments."
-        ),
-        "bear_case": (
-            "Azure capacity constraints may limit near-term growth acceleration. "
-            "AI capex is running at $21B per quarter with unclear ROI timeline."
-        ),
-        "reasoning": (
-            "Microsoft's Q3 FY2026 results showed durable cloud growth with Azure "
-            "reaccelerating. Copilot integration across the product suite is "
-            "creating real revenue uplift. Capacity remains the binding constraint."
-        ),
-    },
-]
-
-# bullish/bearish/neutral → the signals.direction enum (LONG/SHORT/NEUTRAL).
-_SENTIMENT_TO_DIRECTION = {"bullish": "LONG", "bearish": "SHORT", "neutral": "NEUTRAL"}
+DEMO_DATA_PATH = _PROJECT_ROOT / "scripts" / "demo_data.json"
 
 
-def _build_key_metrics(demo: dict) -> dict:
-    """Assemble the key_metrics JSON blob the API expects to flatten."""
-    km = {
-        "sentiment": demo["sentiment"],
-        "guidance_quality": demo["guidance_quality"],
-        "management_tone": demo["management_tone"],
-        "risk_flags": demo["risk_flags"],
-        "bull_case": demo["bull_case"],
-        "bear_case": demo["bear_case"],
-        # Real pipeline stores these; demos have no estimate comparison → null.
-        "eps_beat": None,
-        "revenue_beat": None,
-    }
-    km.update(demo["extra_metrics"])
-    return km
+def _load_demo_data() -> dict:
+    with DEMO_DATA_PATH.open(encoding="utf-8") as fh:
+        return json.load(fh)
 
 
-def seed(db: Database) -> int:
-    """Insert the demo signals. Returns the number of signals inserted."""
+def seed(db: Database, data: dict) -> int:
+    """Insert the exported dataset. Returns the number of signals inserted."""
+    company_ids: dict[str, int] = {}
+    for company in data["companies"]:
+        company_ids[company["ticker"]] = db.upsert_company(
+            ticker=company["ticker"],
+            cik=company["cik"],
+            name=company["name"],
+            exchange=company["exchange"],
+            sector=company["sector"],
+        )
+    print(f"[seed] upserted {len(company_ids)} companies")
+
+    for ed in data["earnings_dates"]:
+        db.upsert_earnings_date(
+            company_id=company_ids[ed["ticker"]],
+            # upsert_earnings_date calls .isoformat(); the export stores the
+            # isoformat string, so this round-trips to the exact stored value.
+            earnings_date=datetime.fromisoformat(ed["earnings_date"]),
+            eps_estimate=ed["eps_estimate"],
+            eps_actual=ed["eps_actual"],
+            surprise_pct=ed["surprise_pct"],
+            revenue_estimate=ed["revenue_estimate"],
+            revenue_actual=ed["revenue_actual"],
+        )
+    print(f"[seed] upserted {len(data['earnings_dates'])} earnings dates")
+
+    filing_ids: dict[str, int] = {}
+    for filing in data["filings"]:
+        filing_ids[filing["accession_number"]] = db.upsert_filing(
+            company_id=company_ids[filing["ticker"]],
+            accession_number=filing["accession_number"],
+            filing_date=filing["filing_date"],
+            form_type=filing["form_type"],
+            period_of_report=filing["period_of_report"],
+            primary_document=filing["primary_document"],
+            document_url=filing["document_url"],
+            cleaned_text=filing["cleaned_text"],
+            word_count=filing["word_count"],
+            fetch_status=filing["fetch_status"],
+            error_message=filing["error_message"],
+        )
+    print(f"[seed] upserted {len(filing_ids)} filings")
+
     inserted = 0
-    for demo in DEMO_SIGNALS:
-        company_id = db.upsert_company(demo["ticker"], demo["cik"], demo["name"])
-
-        cik_int = int(demo["cik"])
-        acc_nodash = demo["accession_number"].replace("-", "")
-        primary_doc = "ex99-1.htm"
-        doc_url = (
-            f"https://www.sec.gov/Archives/edgar/data/"
-            f"{cik_int}/{acc_nodash}/{primary_doc}"
+    for signal in data["signals"]:
+        key_metrics = (
+            json.dumps(signal["key_metrics"], ensure_ascii=False)
+            if signal["key_metrics"] is not None
+            else None
         )
-        cleaned_text = (
-            f"{demo['name']} ({demo['ticker']}) earnings press release "
-            f"(Exhibit 99.1), filed {demo['filing_date']}. "
-            f"{demo['bull_case']} {demo['bear_case']}"
-        )
-
-        filing_id = db.upsert_filing(
-            company_id=company_id,
-            accession_number=demo["accession_number"],
-            filing_date=demo["filing_date"],
-            form_type="8-K",
-            period_of_report=demo["filing_date"],
-            primary_document=primary_doc,
-            document_url=doc_url,
-            cleaned_text=cleaned_text,
-            word_count=len(cleaned_text.split()),
-            fetch_status="success",
-        )
-
-        key_metrics = json.dumps(_build_key_metrics(demo), ensure_ascii=False)
-        direction = _SENTIMENT_TO_DIRECTION[demo["sentiment"]]
-
         db._conn.execute(
             """
             INSERT INTO signals
                 (filing_id, company_id, signal_date, direction, confidence,
                  reasoning, key_metrics, llm_model,
-                 llm_prompt_tokens, llm_completion_tokens, raw_llm_response)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 llm_prompt_tokens, llm_completion_tokens, raw_llm_response,
+                 created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                filing_id,
-                company_id,
-                demo["filing_date"],
-                direction,
-                demo["confidence"],
-                demo["reasoning"],
+                filing_ids[signal["accession_number"]],
+                company_ids[signal["ticker"]],
+                signal["signal_date"],
+                signal["direction"],
+                signal["confidence"],
+                signal["reasoning"],
                 key_metrics,
-                _MODEL,
-                0,
-                0,
-                None,
+                signal["llm_model"],
+                signal["llm_prompt_tokens"],
+                signal["llm_completion_tokens"],
+                signal["raw_llm_response"],
+                signal["created_at"],
             ),
         )
-        db._conn.commit()
         inserted += 1
-        print(f"[seed] inserted demo signal: {demo['ticker']} ({demo['filing_date']})")
+    db._conn.commit()
+    print(f"[seed] inserted {inserted} signals")
 
     return inserted
 
 
-def seed_backtest(db: Database) -> None:
+def seed_backtest(db: Database, data: dict) -> None:
     """
-    Run the backtest engine over the seeded signals and persist the result so
-    the dashboard's Backtest page shows real data on first load.
+    Insert the exported backtest run so the dashboard's Backtest page shows the
+    same numbers as the static snapshot and the README.
 
     Has its own idempotency check (independent of the signals seed) so it still
-    runs on a reboot where signals already exist. Wrapped in try/except: a
-    yfinance/network hiccup on the host must never block startup — the signals
-    still serve, and the next boot retries the backtest.
+    runs on a reboot where signals already exist. Wrapped in try/except: a bad
+    or missing export must never block startup — the signals still serve.
     """
     existing = db._conn.execute("SELECT COUNT(*) AS n FROM backtest_runs").fetchone()["n"]
     if existing > 0:
         print("[seed] Backtest already exists, skipping")
         return
 
-    try:
-        from backtest.engine import BacktestEngine
-        from backtest.store import save_backtest_run
+    results = data.get("backtest")
+    if not results:
+        print("[seed] No backtest in demo_data.json, skipping")
+        return
 
-        # NB: confidence_threshold is a run() argument, not a constructor one.
-        engine = BacktestEngine(db_path=DB_PATH)
-        results = engine.run(confidence_threshold=0.7)
-        save_backtest_run(db, results)
-        print("[seed] Backtest seeded")
+    try:
+        run_id = save_backtest_run(db, results)
+        print(f"[seed] Backtest seeded (run #{run_id}, {results.get('trades_executed', 0)} trades)")
     except Exception as exc:
         print(f"[seed] Backtest seeding failed (skipping): {exc}")
 
 
 def main() -> None:
     db = Database(DB_PATH)
+    data = _load_demo_data()
 
     existing = db._conn.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"]
     if existing > 0:
@@ -269,10 +167,10 @@ def main() -> None:
             "skipping demo seed (idempotent)."
         )
     else:
-        count = seed(db)
+        count = seed(db, data)
         print(f"[seed] done — inserted {count} demo signals into {db.db_path}")
 
-    seed_backtest(db)
+    seed_backtest(db, data)
 
 
 if __name__ == "__main__":
