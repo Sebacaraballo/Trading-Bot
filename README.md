@@ -1,6 +1,6 @@
 # Earnings Intelligence System
 
-> LLM-powered trade signal extraction from SEC earnings filings — reads what 
+> LLM-powered trade signal extraction from SEC earnings filings: reads what 
 > companies *say*, not just what their stock *does*.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
@@ -30,25 +30,25 @@ SEC EDGAR (free, no key)          yfinance (earnings + prices)
          │                                    │
          └──────────────┬─────────────────────┘
                         ▼
-              [ Phase 1 — Data Ingestion ]
+              [ Phase 1 - Data Ingestion ]
               sec_client.py · market_client.py · SQLite
                         │
                         ▼
-              [ Phase 2 — LLM Signal Extraction ]
+              [ Phase 2 - LLM Signal Extraction ]
               Claude Haiku · structured JSON output
               sentiment · confidence · guidance · risk flags
                         │
                         ▼
-              [ Phase 3 — Backtesting ]
-              numpy · 13 trades · 5-day hold window
+              [ Phase 3 - Backtesting ]
+              numpy · 35 trades · 5-day hold window
               Sharpe ratio · max drawdown · vs SPY benchmark
                         │
                         ▼
-              [ Phase 4 — Live Paper Trading ]        ← planned
+              [ Phase 4 - Live Paper Trading ]        ← planned
               Alpaca API · autonomous execution
                         │
                         ▼
-              [ Phase 5 — Dashboard ]
+              [ Phase 5 - Dashboard ]
               FastAPI · React + TypeScript · Recharts
 ```
 
@@ -56,21 +56,21 @@ SEC EDGAR (free, no key)          yfinance (earnings + prices)
 
 ## Results
 
-Backtested on 13 trades across AAPL, NVDA, MSFT, GOOGL (2024–2026):
+Backtested on 35 trades across 10 tickers (2024-2026), buying bullish signals
+with confidence >= 0.6 at the filing-date close and selling 5 trading days later:
 
 | Metric | Value |
 |---|---|
-| Win Rate | 38.5% |
-| Sharpe Ratio | -0.77 |
-| Max Drawdown | -33.4% |
-| Total Return | -13.0% |
-| SPY (same period) | +16.3% |
+| Trades | 35 |
+| Win Rate | 45.7% |
+| Avg Return per Trade | -0.9% |
+| Total Return | -35.9% |
+| SPY Benchmark (same period) | +27.2% |
+| Sharpe Ratio | -0.71 |
+| Max Drawdown | -64.8% |
 
-> **Note:** The live demo runs on 3 seed signals and shows 2 trades (+3.3% vs SPY +2.8%). The table below reflects a fuller 13-trade backtest run locally across multiple earnings cycles. Expand coverage with `python main.py TSLA --filings 10 --analyze` and re-run `python main.py --backtest` to reproduce.
-
-The naive "buy bullish signal, hold 5 days" strategy underperformed SPY. 
-This is the honest result — and the starting point for strategy refinement. 
-Higher confidence thresholds and guidance quality filters are the next iteration.
+Naive equal-weight sizing produces the drawdown shown. Current work:
+transaction-cost modeling and Kelly-criterion position sizing.
 
 ---
 
@@ -78,11 +78,17 @@ Higher confidence thresholds and guidance quality filters are the next iteration
 
 The React dashboard provides five views:
 
-- **Overview** — live stats, sentiment distribution, recent signal feed
-- **Signals** — full signal table with ticker filter, confidence bars, sentiment badges
-- **Signal Detail** — LLM reasoning, bull/bear case, risk flags, raw filing viewer
-- **Backtest** — equity curve, Sharpe/drawdown stats, full trade ledger
-- **Portfolio** — paper trading view (Phase 4)
+- **Overview**: dataset stats, sentiment distribution, recent signal feed
+- **Signals**: full signal table with ticker filter, confidence bars, sentiment badges
+- **Signal Detail**: LLM reasoning, bull/bear case, risk flags, raw filing viewer
+- **Backtest**: equity curve, Sharpe/drawdown stats, performance summary, full trade ledger
+- **Portfolio**: paper trading view (Phase 4)
+
+The hosted demo renders from a static snapshot of this exact dataset (exported
+by `scripts/export_demo_data.py` and bundled with the frontend build), so it
+does not depend on a live backend. When a live API is configured and reachable,
+the dashboard uses it instead; if the API stops responding, the dashboard falls
+back to the snapshot and shows a "cached data" badge.
 
 ---
 
@@ -104,11 +110,11 @@ The React dashboard provides five views:
 
 | Phase | Status | Description |
 |---|---|---|
-| 1 — Data Ingestion | ✅ Complete | SEC EDGAR + yfinance pipeline |
-| 2 — LLM Signals | ✅ Complete | Structured signal extraction |
-| 3 — Backtesting | ✅ Complete | Historical performance analysis |
-| 4 — Paper Trading | 🔜 Planned | Alpaca autonomous execution |
-| 5 — Dashboard | ✅ Complete | FastAPI + React frontend |
+| 1 - Data Ingestion | ✅ Complete | SEC EDGAR + yfinance pipeline |
+| 2 - LLM Signals | ✅ Complete | Structured signal extraction |
+| 3 - Backtesting | ✅ Complete | Historical performance analysis |
+| 4 - Paper Trading | 🔜 Planned | Alpaca autonomous execution |
+| 5 - Dashboard | ✅ Complete | FastAPI + React frontend |
 
 ---
 

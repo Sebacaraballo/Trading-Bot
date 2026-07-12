@@ -35,3 +35,6 @@ Thumbs.db
 # Deploy/demo scripts are intentionally tracked (guard against wildcards above)
 !scripts/
 !scripts/*.py
+
+# Playwright MCP verification artifacts
+.playwright-mcp/
