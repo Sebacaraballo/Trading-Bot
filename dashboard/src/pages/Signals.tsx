@@ -87,10 +87,10 @@ export default function Signals() {
                     <ConfidenceBar value={s.confidence} />
                   </td>
                   <td className="px-5 py-3 capitalize text-[var(--text-muted)]">
-                    {s.guidance_quality ?? "—"}
+                    {s.guidance_quality ?? "n/a"}
                   </td>
                   <td className="px-5 py-3 capitalize text-[var(--text-muted)]">
-                    {s.management_tone ?? "—"}
+                    {s.management_tone ?? "n/a"}
                   </td>
                   <td className="px-5 py-3">
                     <span className="pill bg-[rgba(239,68,68,0.1)] text-[var(--bearish)]">

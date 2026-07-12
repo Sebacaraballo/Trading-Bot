@@ -101,6 +101,65 @@ function StatsRow({ data }: { data: BacktestResults }) {
   );
 }
 
+// The full honest metrics table, including the SPY benchmark the strategy
+// trails. Numbers must match the README and the seeded dataset exactly.
+function SummaryTable({ data }: { data: BacktestResults }) {
+  const returnColor = (v: number) =>
+    v >= 0 ? "var(--bullish)" : "var(--bearish)";
+  const rows: { label: string; value: string; color?: string }[] = [
+    { label: "Trades", value: String(data.trades_executed) },
+    { label: "Win rate", value: pct(data.win_rate, false) },
+    {
+      label: "Avg return per trade",
+      value: pct(data.avg_return_pct),
+      color: returnColor(data.avg_return_pct),
+    },
+    {
+      label: "Total return",
+      value: pct(data.total_return_pct),
+      color: returnColor(data.total_return_pct),
+    },
+    {
+      label: "SPY benchmark (same period)",
+      value: pct(data.spy_return_pct),
+      color: returnColor(data.spy_return_pct),
+    },
+    { label: "Sharpe ratio (annualized, 5-day hold)", value: data.sharpe_ratio.toFixed(2) },
+    {
+      label: "Max drawdown",
+      value: pct(data.max_drawdown_pct),
+      color: "var(--bearish)",
+    },
+  ];
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="border-b border-[var(--border)] px-5 py-4">
+        <h2 className="text-sm font-semibold">Performance Summary</h2>
+      </div>
+      <table className="w-full text-sm">
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.label} className="border-t border-[var(--border)] first:border-t-0">
+              <td className="px-5 py-3 text-[var(--text-muted)]">{row.label}</td>
+              <td
+                className="px-5 py-3 text-right font-medium tabular-nums"
+                style={row.color ? { color: row.color } : undefined}
+              >
+                {row.value}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="border-t border-[var(--border)] px-5 py-4 text-xs leading-relaxed text-[var(--text-muted)]">
+        Naive equal-weight sizing produces the drawdown shown. Current work:
+        transaction-cost modeling and Kelly-criterion position sizing.
+      </p>
+    </div>
+  );
+}
+
 function EquityChart({ data }: { data: BacktestResults }) {
   return (
     <div className="card p-5">
@@ -308,6 +367,7 @@ export default function Backtest() {
         </p>
       </div>
       <StatsRow data={data} />
+      <SummaryTable data={data} />
       <EquityChart data={data} />
       <TradesTable trades={data.trades} />
     </div>

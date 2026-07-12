@@ -101,7 +101,7 @@ export default function SignalDetail() {
           <div className="flex items-center gap-3">
             <SentimentBadge sentiment={data.sentiment} size="lg" />
             <span className="pill bg-[var(--surface-hover)] capitalize text-[var(--text-muted)]">
-              Tone: {data.management_tone ?? "—"}
+              Tone: {data.management_tone ?? "n/a"}
             </span>
             {data.llm_model && (
               <span className="font-mono text-xs text-[var(--text-muted)]">
@@ -121,7 +121,7 @@ export default function SignalDetail() {
             <h2 className="text-sm font-semibold">Bull Case</h2>
           </div>
           <p className="mt-3 text-sm leading-relaxed text-[var(--text-primary)]">
-            {data.bull_case || "—"}
+            {data.bull_case || "n/a"}
           </p>
         </div>
         <div className="card border-l-4 border-l-[var(--bearish)] p-5">
@@ -130,7 +130,7 @@ export default function SignalDetail() {
             <h2 className="text-sm font-semibold">Bear Case</h2>
           </div>
           <p className="mt-3 text-sm leading-relaxed text-[var(--text-primary)]">
-            {data.bear_case || "—"}
+            {data.bear_case || "n/a"}
           </p>
         </div>
       </div>
@@ -144,7 +144,7 @@ export default function SignalDetail() {
           <BeatBadge value={km.revenue_beat} />
         </MetricCard>
         <MetricCard label="Forward Guidance">
-          {data.guidance_quality ?? "—"}
+          {data.guidance_quality ?? "n/a"}
         </MetricCard>
       </div>
 
@@ -174,7 +174,7 @@ export default function SignalDetail() {
       <div className="card p-5">
         <h2 className="text-sm font-semibold">Reasoning</h2>
         <p className="mt-3 text-sm leading-relaxed text-[var(--text-primary)]">
-          {data.reasoning || "—"}
+          {data.reasoning || "n/a"}
         </p>
       </div>
 

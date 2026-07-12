@@ -57,7 +57,7 @@ function EmptyState() {
     <div className="card flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
       <Zap className="h-10 w-10 text-[var(--text-muted)] opacity-50" />
       <p className="text-sm text-[var(--text-muted)]">
-        No signals yet — run{" "}
+        No signals yet. Run{" "}
         <code className="rounded bg-[var(--bg)] px-1.5 py-0.5 font-mono text-[var(--primary)]">
           python main.py AAPL --analyze
         </code>{" "}
@@ -70,10 +70,13 @@ function EmptyState() {
 export default function Overview() {
   const navigate = useNavigate();
   const statsState = useFetch<Stats>(() => getStats(), []);
-  const signalsState = useFetch<Signal[]>(() => getSignals(undefined, 10), []);
+  // Fetch the full signal set so avg confidence and the sentiment split
+  // describe the whole dataset; the table below shows the 10 most recent.
+  const signalsState = useFetch<Signal[]>(() => getSignals(undefined, 200), []);
 
   const stats = statsState.data;
   const signals = signalsState.data ?? [];
+  const recentSignals = signals.slice(0, 10);
 
   const avgConfidence = useMemo(() => {
     if (!signals.length) return 0;
@@ -103,7 +106,7 @@ export default function Overview() {
         <StatCard label="Signals Generated" value={stats?.signals ?? 0} icon={Zap} />
         <StatCard
           label="Avg Confidence"
-          value={signals.length ? `${Math.round(avgConfidence * 100)}%` : "—"}
+          value={signals.length ? `${Math.round(avgConfidence * 100)}%` : "n/a"}
           icon={Gauge}
         />
       </div>
@@ -116,7 +119,7 @@ export default function Overview() {
           <div className="card p-5 lg:col-span-1">
             <h2 className="text-sm font-semibold">Sentiment Distribution</h2>
             <p className="mt-0.5 text-xs text-[var(--text-muted)]">
-              Across {signals.length} recent signal{signals.length === 1 ? "" : "s"}
+              Across all {signals.length} signal{signals.length === 1 ? "" : "s"}
             </p>
             <div className="mt-4 h-[260px]">
               <ResponsiveContainer width="100%" height={260}>
@@ -182,7 +185,7 @@ export default function Overview() {
                 </tr>
               </thead>
               <tbody>
-                {signals.map((s) => (
+                {recentSignals.map((s) => (
                   <tr
                     key={s.id}
                     onClick={() => navigate(`/signals/${s.id}`)}
@@ -197,7 +200,7 @@ export default function Overview() {
                       <ConfidenceBar value={s.confidence} />
                     </td>
                     <td className="px-5 py-3 capitalize text-[var(--text-muted)]">
-                      {s.guidance_quality ?? "—"}
+                      {s.guidance_quality ?? "n/a"}
                     </td>
                   </tr>
                 ))}

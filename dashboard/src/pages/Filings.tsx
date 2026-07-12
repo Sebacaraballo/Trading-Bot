@@ -29,7 +29,7 @@ function FilingDrawer({
           <div className="flex items-center gap-2">
             <FileText className="h-4 w-4 text-[var(--primary)]" />
             <h2 className="text-sm font-semibold">
-              {data ? `${data.ticker} — ${data.filing_date}` : "Filing text"}
+              {data ? `${data.ticker} · ${data.filing_date}` : "Filing text"}
             </h2>
           </div>
           <button
