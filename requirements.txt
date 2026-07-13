@@ -38,5 +38,9 @@ scipy>=1.11.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 
+# TestClient transport for scripts/export_demo_data.py (snapshot capture),
+# used locally and by the daily CI data workflow
+httpx>=0.27.0
+
 # Python standard library used:
 #   sqlite3, argparse, logging, dataclasses, datetime, re, time, json

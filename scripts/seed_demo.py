@@ -1,10 +1,12 @@
 """
 scripts/seed_demo.py
 --------------------
-Seed an empty database with the full demo dataset exported from the real local
-pipeline run (scripts/demo_data.json, produced by scripts/export_demo_data.py):
-50 LLM-scored signals across 10 tickers, their filings and earnings dates, and
-the latest backtest run.
+Seed an empty database with the full demo dataset exported from the real
+pipeline (scripts/demo_data.json, produced by scripts/export_demo_data.py):
+LLM-scored signals across 10 tickers, their filings and earnings dates, and
+the complete backtest run history. The daily CI workflow also uses this as
+its state restore: fresh runner, seed from the committed export, then ingest
+and score only what is new.
 
 Behaviour:
   * Idempotent — if the ``signals`` table already has any rows, the dataset
@@ -14,8 +16,9 @@ Behaviour:
     starts with no DB, since *.db is gitignored).
   * Inserts ``companies`` and ``filings`` rows first and maps their fresh ids
     so the signal foreign keys resolve.
-  * The backtest run is inserted verbatim from the export — no yfinance calls
-    at boot, so results always match the static snapshot and the README.
+  * Backtest runs are inserted verbatim from the export (oldest first, all of
+    them) — no yfinance calls at boot, so results always match the static
+    snapshot and the README, and the run history survives restore cycles.
 
 Run standalone:
     python scripts/seed_demo.py
@@ -77,7 +80,7 @@ def seed(db: Database, data: dict) -> int:
 
     filing_ids: dict[str, int] = {}
     for filing in data["filings"]:
-        filing_ids[filing["accession_number"]] = db.upsert_filing(
+        filing_id = db.upsert_filing(
             company_id=company_ids[filing["ticker"]],
             accession_number=filing["accession_number"],
             filing_date=filing["filing_date"],
@@ -90,6 +93,11 @@ def seed(db: Database, data: dict) -> int:
             fetch_status=filing["fetch_status"],
             error_message=filing["error_message"],
         )
+        filing_ids[filing["accession_number"]] = filing_id
+        # Restore the analysis prefilter mark so CI runs don't re-check
+        # filings already known to carry no earnings exhibit.
+        if filing.get("skip_reason"):
+            db.set_filing_skip_reason(filing_id, filing["skip_reason"])
     print(f"[seed] upserted {len(filing_ids)} filings")
 
     inserted = 0
@@ -132,8 +140,9 @@ def seed(db: Database, data: dict) -> int:
 
 def seed_backtest(db: Database, data: dict) -> None:
     """
-    Insert the exported backtest run so the dashboard's Backtest page shows the
-    same numbers as the static snapshot and the README.
+    Insert the complete exported backtest run history (oldest first) so the
+    dashboard shows the same numbers as the static snapshot and the README,
+    and the record of the strategy evolving over time is preserved.
 
     Has its own idempotency check (independent of the signals seed) so it still
     runs on a reboot where signals already exist. Wrapped in try/except: a bad
@@ -141,17 +150,22 @@ def seed_backtest(db: Database, data: dict) -> None:
     """
     existing = db._conn.execute("SELECT COUNT(*) AS n FROM backtest_runs").fetchone()["n"]
     if existing > 0:
-        print("[seed] Backtest already exists, skipping")
+        print("[seed] Backtest runs already exist, skipping")
         return
 
-    results = data.get("backtest")
-    if not results:
-        print("[seed] No backtest in demo_data.json, skipping")
+    runs = data.get("backtest_runs") or []
+    if not runs:
+        print("[seed] No backtest runs in demo_data.json, skipping")
         return
 
     try:
-        run_id = save_backtest_run(db, results)
-        print(f"[seed] Backtest seeded (run #{run_id}, {results.get('trades_executed', 0)} trades)")
+        for results in runs:
+            save_backtest_run(db, results)
+        latest = runs[-1]
+        print(
+            f"[seed] Backtest history seeded ({len(runs)} runs, "
+            f"latest: {latest.get('trades_executed', 0)} trades)"
+        )
     except Exception as exc:
         print(f"[seed] Backtest seeding failed (skipping): {exc}")
 

@@ -1,26 +1,33 @@
 """
 scripts/export_demo_data.py
 ---------------------------
-Export the local earnings_intel.db into the two demo artifacts, keeping the
+Export the earnings_intel database into the two demo artifacts, keeping the
 dashboard, the seed, and the static snapshot on one source of truth:
 
   1. scripts/demo_data.json
      Raw rows (companies, earnings_dates, filings sans raw_html, signals,
-     latest backtest run) consumed by scripts/seed_demo.py wherever the
-     backend boots with an empty database.
+     ALL backtest runs) consumed by scripts/seed_demo.py wherever the
+     backend boots with an empty database. In CI this file is also the
+     persistent state between daily runs: the workflow restores a DB from
+     it, ingests/scores/backtests, and re-exports.
 
   2. dashboard/public/snapshot/*.json
-     Byte-for-byte API responses captured through FastAPI's TestClient, shipped
-     with the Vercel build. This is the dashboard's primary data source when no
-     live API is configured, and its fallback when a configured API is down:
-       stats.json         GET /api/stats
-       signals.json       GET /api/signals?limit=500
-       filings.json       GET /api/filings?limit=500
-       backtest.json      GET /api/backtest/latest
-       filing-texts.json  {filing_id: GET /api/filings/{id}/text}
-       meta.json          generation timestamp + counts
+     Byte-for-byte API responses captured through FastAPI's TestClient,
+     shipped with the Vercel build. This is the dashboard's primary data
+     source when no live API is configured, and its fallback otherwise:
+       stats.json          GET /api/stats
+       signals.json        GET /api/signals?limit=500
+       filings.json        GET /api/filings?limit=500
+       backtest.json       GET /api/backtest/latest
+       backtest-runs.json  GET /api/backtest/runs   (full run history)
+       filing-texts.json   {filing_id: GET /api/filings/{id}/text}
+       meta.json           generation timestamp + counts
 
-Run after any change to the local dataset (new signals, new backtest run):
+Writes are conditional: a file is only rewritten when its content (ignoring
+the exported_at / generated_at stamps) actually changed, so a no-new-data CI
+run leaves the working tree clean and no commit or redeploy happens.
+
+Run after any change to the dataset (new signals, new backtest run):
     python scripts/export_demo_data.py
 """
 
@@ -31,6 +38,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -39,19 +47,46 @@ DB_PATH = os.getenv("DB_PATH", "earnings_intel.db")
 DEMO_DATA_PATH = _PROJECT_ROOT / "scripts" / "demo_data.json"
 SNAPSHOT_DIR = _PROJECT_ROOT / "dashboard" / "public" / "snapshot"
 
+# Fields that change on every export and must not count as "data changed".
+_VOLATILE_KEYS = {"exported_at", "generated_at"}
 
-def _dump(path: Path, payload: object) -> None:
+
+def _load_existing(path: Path) -> Optional[object]:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _strip_volatile(payload: object) -> object:
+    if isinstance(payload, dict):
+        return {k: v for k, v in payload.items() if k not in _VOLATILE_KEYS}
+    return payload
+
+
+def _write_if_changed(path: Path, payload: object) -> bool:
+    """
+    Write *payload* as compact JSON only if it differs from what is on disk,
+    comparing without the volatile timestamp fields. Returns True if written.
+    """
+    existing = _load_existing(path)
+    if existing is not None and _strip_volatile(existing) == _strip_volatile(payload):
+        print(f"[export] {path.relative_to(_PROJECT_ROOT)} unchanged")
+        return False
     path.write_text(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
     print(f"[export] wrote {path.relative_to(_PROJECT_ROOT)} ({path.stat().st_size:,} bytes)")
+    return True
 
 
-def export_seed_data() -> dict:
-    """Dump raw DB rows into scripts/demo_data.json for the seeder."""
+def export_seed_data() -> tuple[dict, bool]:
+    """Dump raw DB rows into scripts/demo_data.json. Returns (payload, changed)."""
     from storage.database import Database
-    from backtest.store import get_latest_backtest
+    from backtest.store import get_all_backtests
 
     db = Database(DB_PATH)
     conn = db._conn
@@ -76,13 +111,15 @@ def export_seed_data() -> dict:
     ]
 
     # raw_html is ~4 MB across the DB and nothing downstream reads it — skip it.
+    # skip_reason must round-trip so the CI restore cycle keeps prefilter marks.
     filings = [
         dict(r)
         for r in conn.execute(
             """
             SELECT c.ticker, f.accession_number, f.filing_date, f.form_type,
                    f.period_of_report, f.primary_document, f.document_url,
-                   f.cleaned_text, f.word_count, f.fetch_status, f.error_message
+                   f.cleaned_text, f.word_count, f.fetch_status, f.error_message,
+                   f.skip_reason
             FROM   filings f JOIN companies c ON c.id = f.company_id
             ORDER BY f.filing_date, f.accession_number
             """
@@ -99,7 +136,7 @@ def export_seed_data() -> dict:
         FROM   signals s
         JOIN   filings f ON f.id = s.filing_id
         JOIN   companies c ON c.id = s.company_id
-        ORDER BY s.signal_date, c.ticker
+        ORDER BY s.signal_date, c.ticker, s.created_at
         """
     ):
         row = dict(r)
@@ -107,9 +144,10 @@ def export_seed_data() -> dict:
         row["key_metrics"] = json.loads(row["key_metrics"]) if row["key_metrics"] else None
         signals.append(row)
 
-    backtest = get_latest_backtest(db)
-    if backtest is not None:
-        backtest.pop("id", None)  # row id is DB-local; the seeder inserts fresh
+    # Full run history, oldest first: the record of the strategy evolving.
+    backtest_runs = get_all_backtests(db)
+    for run in backtest_runs:
+        run.pop("id", None)  # row ids are DB-local; the seeder inserts fresh
 
     payload = {
         "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -117,14 +155,14 @@ def export_seed_data() -> dict:
         "earnings_dates": earnings_dates,
         "filings": filings,
         "signals": signals,
-        "backtest": backtest,
+        "backtest_runs": backtest_runs,
     }
-    _dump(DEMO_DATA_PATH, payload)
-    return payload
+    changed = _write_if_changed(DEMO_DATA_PATH, payload)
+    return payload, changed
 
 
-def export_snapshot() -> None:
-    """Capture real API responses into dashboard/public/snapshot/."""
+def export_snapshot() -> bool:
+    """Capture real API responses into dashboard/public/snapshot/. Returns changed."""
     os.environ["DB_PATH"] = DB_PATH
     from fastapi.testclient import TestClient
 
@@ -142,6 +180,7 @@ def export_snapshot() -> None:
     signals = get("/api/signals?limit=500")
     filings = get("/api/filings?limit=500")
     backtest = get("/api/backtest/latest")
+    backtest_runs = get("/api/backtest/runs")
 
     filing_texts = {}
     for filing in filings:
@@ -151,30 +190,40 @@ def export_snapshot() -> None:
         if res.status_code == 200:
             filing_texts[str(filing["id"])] = res.json()
 
-    _dump(SNAPSHOT_DIR / "stats.json", stats)
-    _dump(SNAPSHOT_DIR / "signals.json", signals)
-    _dump(SNAPSHOT_DIR / "filings.json", filings)
-    _dump(SNAPSHOT_DIR / "backtest.json", backtest)
-    _dump(SNAPSHOT_DIR / "filing-texts.json", filing_texts)
-    _dump(
-        SNAPSHOT_DIR / "meta.json",
-        {
-            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "signals": len(signals),
-            "filings": len(filings),
-            "trades": backtest.get("trades_executed") if isinstance(backtest, dict) else None,
-        },
-    )
+    changed = False
+    changed |= _write_if_changed(SNAPSHOT_DIR / "stats.json", stats)
+    changed |= _write_if_changed(SNAPSHOT_DIR / "signals.json", signals)
+    changed |= _write_if_changed(SNAPSHOT_DIR / "filings.json", filings)
+    changed |= _write_if_changed(SNAPSHOT_DIR / "backtest.json", backtest)
+    changed |= _write_if_changed(SNAPSHOT_DIR / "backtest-runs.json", backtest_runs)
+    changed |= _write_if_changed(SNAPSHOT_DIR / "filing-texts.json", filing_texts)
+
+    if changed:
+        _write_if_changed(
+            SNAPSHOT_DIR / "meta.json",
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "signals": len(signals),
+                "filings": len(filings),
+                "trades": backtest.get("trades_executed") if isinstance(backtest, dict) else None,
+                "backtest_runs": len(backtest_runs),
+            },
+        )
+    else:
+        print("[export] snapshot unchanged, meta.json kept")
+    return changed
 
 
 def main() -> None:
-    payload = export_seed_data()
-    export_snapshot()
-    bt = payload["backtest"] or {}
+    payload, seed_changed = export_seed_data()
+    snapshot_changed = export_snapshot()
+    runs = payload["backtest_runs"]
+    latest_trades = runs[-1].get("trades_executed", 0) if runs else 0
     print(
         f"[export] done - {len(payload['signals'])} signals, "
         f"{len(payload['companies'])} companies, {len(payload['filings'])} filings, "
-        f"backtest: {bt.get('trades_executed', 0)} trades"
+        f"{len(runs)} backtest runs (latest: {latest_trades} trades), "
+        f"changed={'yes' if (seed_changed or snapshot_changed) else 'no'}"
     )
 
 

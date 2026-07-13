@@ -194,7 +194,23 @@ class Database:
         """Create all tables and indexes if they do not already exist."""
         self._conn.executescript(_SCHEMA_SQL)
         self._migrate_backtest_columns()
+        self._migrate_filings_columns()
         self._conn.commit()
+
+    def _migrate_filings_columns(self) -> None:
+        """
+        Add ``filings.skip_reason`` on databases created before the analysis
+        prefilter existed. NULL = eligible for Phase 2; a value (e.g.
+        'no_earnings_exhibit') permanently excludes the filing from LLM
+        scoring so daily pipeline runs stop re-checking it.
+        """
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(filings)")
+        }
+        if "skip_reason" not in existing:
+            self._conn.execute("ALTER TABLE filings ADD COLUMN skip_reason TEXT")
+            logger.debug("Migrated filings: added column skip_reason")
 
     def _migrate_backtest_columns(self) -> None:
         """
@@ -509,6 +525,23 @@ class Database:
     # ------------------------------------------------------------------
     # signals  (Phase 2)
     # ------------------------------------------------------------------
+
+    def set_filing_skip_reason(self, filing_id: int, reason: Optional[str]) -> None:
+        """
+        Mark a filing as permanently excluded from Phase 2 analysis (or clear
+        the mark with ``None``). Used by the pipeline prefilter for 8-Ks that
+        carry no earnings exhibit, so daily runs stop re-fetching their index.
+
+        Args:
+            filing_id: FK to ``filings.id``.
+            reason:    Short machine-readable reason (e.g. 'no_earnings_exhibit'),
+                       or ``None`` to make the filing eligible again.
+        """
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE filings SET skip_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (reason, filing_id),
+            )
 
     def save_signal(
         self,

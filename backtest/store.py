@@ -74,20 +74,8 @@ def save_backtest_run(db: Database, results: dict[str, Any]) -> int:
         return int(cur.lastrowid)  # type: ignore[arg-type]
 
 
-def get_latest_backtest(db: Database) -> Optional[dict[str, Any]]:
-    """
-    Return the most recent backtest run as a full results dict, or None.
-
-    Re-hydrates trades_json / equity_curve_json into Python objects and rebuilds
-    the same shape ``BacktestEngine.run()`` produced.
-    """
-    row = db._conn.execute(
-        "SELECT * FROM backtest_runs ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    if row is None:
-        return None
-
-    r = dict(row)
+def _row_to_results(r: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the ``BacktestEngine.run()`` results shape from a table row."""
     return {
         "id": r["id"],
         "run_date": r.get("run_date"),
@@ -105,6 +93,34 @@ def get_latest_backtest(db: Database) -> Optional[dict[str, Any]]:
         "trades": json.loads(r.get("trades_json") or "[]"),
         "equity_curve": json.loads(r.get("equity_curve_json") or "[]"),
     }
+
+
+def get_all_backtests(db: Database) -> list[dict[str, Any]]:
+    """
+    Return every backtest run as a full results dict, oldest first.
+
+    The run history is the record of the strategy evolving over time, so the
+    demo export keeps all of it (see scripts/export_demo_data.py).
+    """
+    rows = db._conn.execute(
+        "SELECT * FROM backtest_runs ORDER BY id ASC"
+    ).fetchall()
+    return [_row_to_results(dict(r)) for r in rows]
+
+
+def get_latest_backtest(db: Database) -> Optional[dict[str, Any]]:
+    """
+    Return the most recent backtest run as a full results dict, or None.
+
+    Re-hydrates trades_json / equity_curve_json into Python objects and rebuilds
+    the same shape ``BacktestEngine.run()`` produced.
+    """
+    row = db._conn.execute(
+        "SELECT * FROM backtest_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    return _row_to_results(dict(row))
 
 
 def list_backtest_runs(db: Database) -> list[dict[str, Any]]:
