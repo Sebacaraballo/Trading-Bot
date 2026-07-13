@@ -26,6 +26,7 @@ number.  The CLI and dashboard multiply by 100 for display.
 from __future__ import annotations
 
 import math
+import time
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
@@ -40,6 +41,11 @@ _HOLD_DAYS = 5            # trading days held per trade
 _START_CAPITAL = 10_000.0  # equity curve starting value (USD)
 _TRADING_DAYS_PER_YEAR = 252
 _MIN_SIGNALS_WARN = 5     # below this, results aren't statistically meaningful
+
+# yfinance retry policy. Yahoo throttles shared cloud IPs (GitHub Actions
+# runners especially), so a single failed download must not sink the run.
+_DOWNLOAD_ATTEMPTS = 3
+_DOWNLOAD_BACKOFF_SECONDS = 3.0  # 3s, then 6s between attempts
 
 
 class BacktestEngine:
@@ -185,20 +191,8 @@ class BacktestEngine:
         prices: dict[str, pd.DataFrame] = {}
         fetched: list[str] = []
         for ticker in tickers:
-            try:
-                df = yf.download(
-                    ticker,
-                    start=start,
-                    end=end,
-                    auto_adjust=True,
-                    progress=False,
-                )
-            except Exception as exc:  # network / yfinance failure — skip ticker
-                print(f"[Backtest]   ! price fetch failed for {ticker}: {exc}")
-                continue
-
-            df = self._normalize_prices(df)
-            if df is None or df.empty:
+            df = self._download_with_retry(ticker, start, end)
+            if df is None:
                 print(f"[Backtest]   ! no price data returned for {ticker}")
                 continue
 
@@ -207,6 +201,45 @@ class BacktestEngine:
 
         print(f"[Backtest] Fetched price data for: {', '.join(fetched) or '(none)'}")
         return prices
+
+    def _download_with_retry(
+        self,
+        symbol: str,
+        start: str,
+        end: str,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Download and normalize daily prices, retrying transient failures with
+        exponential backoff. Returns None once all attempts are exhausted.
+        """
+        for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+            try:
+                df = yf.download(
+                    symbol,
+                    start=start,
+                    end=end,
+                    auto_adjust=True,
+                    progress=False,
+                )
+            except Exception as exc:
+                df = None
+                print(
+                    f"[Backtest]   ! price fetch failed for {symbol} "
+                    f"(attempt {attempt}/{_DOWNLOAD_ATTEMPTS}): {exc}"
+                )
+            else:
+                df = self._normalize_prices(df)
+                if df is not None and not df.empty:
+                    return df
+                print(
+                    f"[Backtest]   ! empty price data for {symbol} "
+                    f"(attempt {attempt}/{_DOWNLOAD_ATTEMPTS})"
+                )
+
+            if attempt < _DOWNLOAD_ATTEMPTS:
+                time.sleep(_DOWNLOAD_BACKOFF_SECONDS * attempt)
+
+        return None
 
     @staticmethod
     def _normalize_prices(df: pd.DataFrame) -> Optional[pd.DataFrame]:
@@ -382,8 +415,7 @@ class BacktestEngine:
         try:
             start = (datetime.fromisoformat(first_entry) - timedelta(days=7)).date().isoformat()
             end = (datetime.fromisoformat(last_exit) + timedelta(days=2)).date().isoformat()
-            df = yf.download("SPY", start=start, end=end, auto_adjust=True, progress=False)
-            df = self._normalize_prices(df)
+            df = self._download_with_retry("SPY", start, end)
             if df is None or df.empty:
                 print("[Backtest]   ! SPY benchmark unavailable")
                 return 0.0
