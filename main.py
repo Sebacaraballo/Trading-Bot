@@ -99,7 +99,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Run Phase 2: fetch Exhibit 99.1 for each filing and extract "
-            "LLM signals (requires ANTHROPIC_API_KEY in .env)"
+            "LLM signals (requires ANTHROPIC_API_KEY in .env). With no "
+            "TICKER, analyzes pending filings across all companies."
+        ),
+    )
+    parser.add_argument(
+        "--max-llm",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Cap the number of LLM API calls per --analyze run; remaining "
+            "filings stay pending for the next run (default: unlimited)"
         ),
     )
     parser.add_argument(
@@ -225,13 +236,23 @@ def print_signal(result, idx: int, total: int) -> None:
 
     if not result.success or result.signal is None:
         error_msg = result.error or "Unknown error"
-        console.print(
-            Panel(
-                f"[red]✗ Failed:[/red] {error_msg}",
-                title=f"[dim]{result.ticker}  {result.filing_date}[/dim]",
-                border_style="red",
+        # Prefilter marks and budget deferrals are expected outcomes, not errors.
+        if "marked" in error_msg or "deferred" in error_msg or "retry" in error_msg:
+            console.print(
+                Panel(
+                    f"[yellow]Skipped:[/yellow] {error_msg}",
+                    title=f"[dim]{result.ticker}  {result.filing_date}[/dim]",
+                    border_style="yellow",
+                )
             )
-        )
+        else:
+            console.print(
+                Panel(
+                    f"[red]✗ Failed:[/red] {error_msg}",
+                    title=f"[dim]{result.ticker}  {result.filing_date}[/dim]",
+                    border_style="red",
+                )
+            )
         return
 
     sig = result.signal
@@ -295,13 +316,15 @@ def print_signal(result, idx: int, total: int) -> None:
     )
 
 
-def run_analysis(ticker: str, db: Database) -> None:
+def run_analysis(db: Database, ticker: str | None = None, max_llm: int | None = None) -> None:
     """
     Execute the Phase 2 signal extraction pipeline with a rich progress display.
 
     Args:
-        ticker: Stock ticker symbol.
-        db:     Open :class:`~storage.database.Database` instance.
+        db:      Open :class:`~storage.database.Database` instance.
+        ticker:  Stock ticker symbol, or ``None`` to analyze pending filings
+                 across all companies.
+        max_llm: Optional cap on LLM API calls for this run.
     """
     from analysis.pipeline import SignalPipeline
 
@@ -316,19 +339,22 @@ def run_analysis(ticker: str, db: Database) -> None:
         console.print(f"\n[bold red]Error:[/bold red] {exc}")
         return
 
+    label = ticker or "all tickers"
     pipeline = SignalPipeline(db=db, llm_client=llm)
     pending = pipeline.get_pending_filings(ticker)
 
     if not pending:
         console.print(
-            f"\n[yellow]⚠[/yellow]  No unanalyzed filings found for [bold]{ticker}[/bold].\n"
-            f"  Run [dim]python main.py {ticker}[/dim] first to fetch filings, "
-            "or all filings may already have signals."
+            f"\n[yellow]⚠[/yellow]  No unanalyzed filings found for [bold]{label}[/bold].\n"
+            "  Run ingestion first to fetch filings, or all filings may "
+            "already have signals."
         )
         return
 
+    budget_note = f" (max {max_llm} LLM calls)" if max_llm is not None else ""
     console.print(
-        f"\nFound [bold]{len(pending)}[/bold] filing(s) to analyze for [bold]{ticker}[/bold].\n"
+        f"\nFound [bold]{len(pending)}[/bold] filing(s) to analyze for "
+        f"[bold]{label}[/bold]{budget_note}.\n"
     )
 
     with Progress(
@@ -339,24 +365,32 @@ def run_analysis(ticker: str, db: Database) -> None:
         console=console,
         transient=True,
     ) as progress:
-        task = progress.add_task(f"Analyzing {ticker}…", total=len(pending))
+        task = progress.add_task(f"Analyzing {label}…", total=len(pending))
 
-        for i, filing in enumerate(pending, start=1):
+        def on_result(result, idx: int, total: int) -> None:
             progress.update(
                 task,
-                description=f"[cyan]{ticker}[/cyan]  {filing['filing_date']}  "
-                             f"({i}/{len(pending)})  fetching exhibit…",
+                description=f"[cyan]{result.ticker}[/cyan]  {result.filing_date}  "
+                             f"({idx}/{total})",
             )
-            result = pipeline.process_filing(filing)
             progress.advance(task)
-
             # Print result panel outside the progress bar
             progress.stop()
-            print_signal(result, i, len(pending))
+            print_signal(result, idx, total)
             progress.start()
 
-    # Summary
-    run_summary_table(ticker, pending, pipeline)
+        run = pipeline.run(ticker=ticker, max_llm=max_llm, on_result=on_result)
+
+    console.print(
+        f"\n[dim]Analyzed {run.total} filing(s): "
+        f"[green]{run.succeeded} scored[/green], {run.skipped} without earnings "
+        f"exhibit (marked), {run.deferred} deferred, [red]{run.failed} failed[/red], "
+        f"{run.llm_calls} LLM call(s).[/dim]"
+    )
+
+    # Summary table (per-ticker view only)
+    if ticker:
+        run_summary_table(ticker, pending, pipeline)
 
 
 def run_summary_table(ticker: str, pending: list, pipeline) -> None:
@@ -562,11 +596,30 @@ def main() -> None:
         console.print()
         return
 
-    # ── Phases 1/2 require a ticker ───────────────────────────────────────
+    # ── Phase 2 across all tickers (no ingestion) ─────────────────────────
+    if args.analyze and not args.ticker:
+        try:
+            db = Database(args.db)
+        except Exception as exc:
+            console.print(f"\n[bold red]Error:[/bold red] Could not open database: {exc}")
+            sys.exit(1)
+        try:
+            run_analysis(db, ticker=None, max_llm=args.max_llm)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted.[/yellow]")
+            sys.exit(130)
+        except Exception as exc:
+            console.print(f"\n[bold red]Analysis error:[/bold red] {exc}")
+            logger.exception("Unhandled exception in run_analysis()")
+            sys.exit(1)
+        console.print()
+        return
+
+    # ── Phase 1 requires a ticker ─────────────────────────────────────────
     if not args.ticker:
         console.print(
             "\n[bold red]Error:[/bold red] a TICKER is required "
-            "(or pass --backtest to run Phase 3).\n"
+            "(or pass --backtest / --analyze for the ticker-less modes).\n"
             "  e.g. [dim]python main.py AAPL --analyze[/dim]"
         )
         sys.exit(1)
@@ -603,7 +656,7 @@ def main() -> None:
 
     # Phase 2 — LLM signal extraction
     if args.analyze:
-        run_analysis(args.ticker.upper(), db)
+        run_analysis(db, ticker=args.ticker.upper(), max_llm=args.max_llm)
 
     console.print()
 
