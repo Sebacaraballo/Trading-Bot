@@ -25,7 +25,19 @@ dashboard, the seed, and the static snapshot on one source of truth:
 
 Writes are conditional: a file is only rewritten when its content (ignoring
 the exported_at / generated_at stamps) actually changed, so a no-new-data CI
-run leaves the working tree clean and no commit or redeploy happens.
+run leaves the working tree clean and no commit or redeploy happens. Two
+stability rules make that hold in practice:
+
+  * earnings_dates values are treated as volatile for the change decision:
+    yfinance revises analyst estimates a little every day, nothing in the
+    dashboard displays those values, and without this rule every CI run
+    would commit. Fresh earnings data still lands whenever a real change
+    (filings/signals/backtest) writes the file.
+  * The snapshot is captured from a scratch DB seeded from the just-built
+    export, not from the working DB. Row ids in API responses depend on
+    insertion order, and a mid-cycle ingest would otherwise renumber them
+    on the next restore, rewriting snapshot files with identical content.
+    Seeding first makes the snapshot a pure function of demo_data.json.
 
 Run after any change to the dataset (new signals, new backtest run):
     python scripts/export_demo_data.py
@@ -60,19 +72,27 @@ def _load_existing(path: Path) -> Optional[object]:
         return None
 
 
-def _strip_volatile(payload: object) -> object:
+def _strip_volatile(payload: object, extra_keys: frozenset = frozenset()) -> object:
     if isinstance(payload, dict):
-        return {k: v for k, v in payload.items() if k not in _VOLATILE_KEYS}
+        skip = _VOLATILE_KEYS | extra_keys
+        return {k: v for k, v in payload.items() if k not in skip}
     return payload
 
 
-def _write_if_changed(path: Path, payload: object) -> bool:
+def _write_if_changed(
+    path: Path,
+    payload: object,
+    ignore_keys: frozenset = frozenset(),
+) -> bool:
     """
     Write *payload* as compact JSON only if it differs from what is on disk,
-    comparing without the volatile timestamp fields. Returns True if written.
+    comparing without the volatile timestamp fields (plus any *ignore_keys*).
+    Returns True if written.
     """
     existing = _load_existing(path)
-    if existing is not None and _strip_volatile(existing) == _strip_volatile(payload):
+    if existing is not None and (
+        _strip_volatile(existing, ignore_keys) == _strip_volatile(payload, ignore_keys)
+    ):
         print(f"[export] {path.relative_to(_PROJECT_ROOT)} unchanged")
         return False
     path.write_text(
@@ -157,13 +177,40 @@ def export_seed_data() -> tuple[dict, bool]:
         "signals": signals,
         "backtest_runs": backtest_runs,
     }
-    changed = _write_if_changed(DEMO_DATA_PATH, payload)
+    # earnings_dates is volatile (daily yfinance estimate revisions) and feeds
+    # nothing user-visible; it must not be able to trigger a commit by itself.
+    changed = _write_if_changed(
+        DEMO_DATA_PATH, payload, ignore_keys=frozenset({"earnings_dates"})
+    )
     return payload, changed
 
 
-def export_snapshot() -> bool:
-    """Capture real API responses into dashboard/public/snapshot/. Returns changed."""
-    os.environ["DB_PATH"] = DB_PATH
+def export_snapshot(payload: dict) -> bool:
+    """
+    Capture real API responses into dashboard/public/snapshot/. Returns changed.
+
+    Runs against a scratch DB seeded from *payload* (not the working DB), so
+    row ids in the captured responses are always the deterministic seed-order
+    ids that any future restore of demo_data.json would reproduce.
+    """
+    norm_db = _PROJECT_ROOT / ".snapshot_norm.db"
+    for sidecar in ("", "-wal", "-shm"):
+        try:
+            Path(f"{norm_db}{sidecar}").unlink()
+        except (FileNotFoundError, PermissionError):
+            pass
+
+    from storage.database import Database
+    from scripts.seed_demo import seed as _seed, seed_backtest as _seed_backtest
+
+    norm = Database(str(norm_db))
+    _seed(norm, payload)
+    _seed_backtest(norm, payload)
+
+    # api.main reads DB_PATH at import time; point it at the scratch DB. The
+    # file is gitignored (*.db) and cleaned up on the next export run, since
+    # the API's open connection can keep it locked on Windows until exit.
+    os.environ["DB_PATH"] = str(norm_db)
     from fastapi.testclient import TestClient
 
     from api.main import app
@@ -216,7 +263,7 @@ def export_snapshot() -> bool:
 
 def main() -> None:
     payload, seed_changed = export_seed_data()
-    snapshot_changed = export_snapshot()
+    snapshot_changed = export_snapshot(payload)
     runs = payload["backtest_runs"]
     latest_trades = runs[-1].get("trades_executed", 0) if runs else 0
     print(
