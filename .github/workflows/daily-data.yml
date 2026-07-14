@@ -14,9 +14,11 @@ name: Daily data refresh
 
 on:
   schedule:
-    # 02:30 UTC Tue-Sat = Mon-Fri evening ET, after the close and the
-    # after-hours 8-K dump. GitHub cron can start runs a few minutes late.
-    - cron: "30 2 * * 2-6"
+    # 02:47 UTC Tue-Sat = Mon-Fri evening ET, after the close and the
+    # after-hours 8-K dump. The odd minute is deliberate: GitHub delays or
+    # drops schedules on congested :00/:30 slots (the 02:30 slot was
+    # silently skipped on this repo's first scheduled night).
+    - cron: "47 2 * * 2-6"
   workflow_dispatch:
 
 concurrency:
